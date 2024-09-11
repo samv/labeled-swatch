@@ -5,6 +5,10 @@
 // to write–in the manufacturer and color name (if useful).  All you need to do
 // is customize the material.
 
+// Copyright 2024, Sam Vilain.  All rights reserved.
+// You can use this under the terms of the GPL version 3 or later.  For other
+// terms, please get in touch.
+
 /* [Swatch Print Settings] */
 initial_layer_height = 0.24;
 layer_height = 0.2;
