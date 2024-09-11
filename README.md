@@ -113,3 +113,10 @@ Why would you want this model?  Let me enumerate:
 ## Motivation and backstory
 
 To be completed...
+
+## License and author
+
+Copyright 2024, Sam Vilain.  All Rights Reserved.
+This file may be used under the terms of the GNU General Public License, either
+verison 3 or, at your discretion, any later version.  If this is inconvenient
+to me, please hit me up on Voron discord as @DaddyBuiltIt and we can discuss.
