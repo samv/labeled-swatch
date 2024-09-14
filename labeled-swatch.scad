@@ -42,9 +42,12 @@ color_code = "";
 contrast_color = "#000";
 
 // set to add print setings to the swatch
-nozzle_temp_range = [0, 0];
-bed_temp_range = [0, 0];
-chamber_temp_range = [0,0];
+nozzle_temp_range = [-1, -1];
+bed_temp_range = [-1, -1];
+chamber_temp_range = [-1, -1];
+part_fan_speed = [-1, -1];
+// If you just want to type what goes in the print settings space, enter it here
+print_settings_override = "";
 
 /* [Font for Manufacturer] */
 // The font to use for the Manufacturer
@@ -67,17 +70,24 @@ label_material_font_height = 8; // [6:0.5:10]
 
 /* [Font for other details] */
 // The font to use for everything else
-label_details_font = "Helvetica Neue";
-label_details_font_width = "Narrow";  // ["":Default, Narrow, XNarrow:Extra Narrow, Cond:"Cond(ensed)", Condensed]
-label_details_font_weight = "Bold";  // ["":Default, Thin, Light, Book, Medium, Bold, Heavy, Ultra]
+label_details_font = "Noto Sans";
+label_details_font_width = "";  // ["":Default, SemiCondensed, Condensed, ExtraCondensed]
+label_details_font_weight = "";  // [Thin, ExtraLight, Light, Medium, "":Default, SemiBold, Bold, ExtraBold, Black]
 label_details_font_style = "";  // ["":Regular, Italic]
 label_details_font_height = 5; // [4:0.25:7]
 
+// Just the color name in italics looks good and squeezes a bit more in, it seems
+label_color_name_font_style = "Italic"; // ["":Regular, Italic]
+
 /* [Font for print settings] */
 // if temperatures are specified, they are printed with this width and height; font and weight come from the "details" setting.
-label_settings_font_width = "Condensed"; //  ["":Default, Narrow, XNarrow:Extra Narrow, Cond:"Cond(ensed)", Condensed]
+label_settings_font_width = ""; //  ["":Default, SemiCondensed, Condensed, ExtraCondensed, Narrow, XNarrow:Extra Narrow, Cond:"Cond(ensed)", Condensed]
 label_settings_font_height = 4; // [3:0.25:6]
-
+// Pick a symbol for each setting prefix, but sadly OpenSCAD doesn't do a good job of finding the appropriate font that contains the glyphs for the unicode characters.
+label_settings_nozzle_temp_glyph = "T:";  // ["T:", Ⓣ, 🅃, 🆃, "N:", Ⓝ, 🄽, 🅽, ↓, 🌡, ⚺, ⛉, ⛊]
+label_settings_bed_temp_glyph = "B:";  // ["B:", Ⓑ , 🄱, 🅱, ■, ⬜, ⬚, □, 🞐, 🞑, 🞒, 🞓, 🛏]
+label_settings_chamber_temp_glyph = "C:";  // ["C:", Ⓒ, 🄲, 🅲, ⛶, ▣, 🌤, ♨, 🌡]
+label_settings_fan_speed_glyph = "F:";  // ["F:", Ⓒ, 🄲, 🅲, ⛶, ▣, 🌤, ♨, 🌡]
 
 /* [Swatch Dimensions] */
 // Maximum swatch thickness
@@ -150,26 +160,44 @@ function font_id(font_name, font_width="", font_weight="", font_style="") = str(
 label_material_code = str(material, (filler == "" ? "" : str(filler == "+" ? "" : "-", filler)));
 label_material_font_id = font_id(label_material_font, font_width=label_material_font_width, font_weight=label_material_font_weight, font_style=label_material_font_style);
 label_manufacturer_font_id = font_id(label_manufacturer_font, font_width=label_manufacturer_font_width, font_weight=label_manufacturer_font_weight, font_style=label_manufacturer_font_style);
+label_color_name_font_id = font_id(label_details_font, font_width=label_details_font_width, font_weight=label_details_font_weight, font_style=label_color_name_font_style);
 label_details_font_id = font_id(label_details_font, font_width=label_details_font_width, font_weight=label_details_font_weight, font_style=label_details_font_style);
 label_settings_font_id = font_id(label_details_font, font_width=label_settings_font_width, font_weight=label_details_font_weight, font_style=label_details_font_style);
 
-function show_temp_range(temp_label, temp_range) = (
-    temp_range == [0,0] ? "" :
-        str(temp_label, ":",
-            (temp_range[1]) == 0 ? temp_range[0] :
-            str(temp_range[0], "-", temp_range[1]))
-);
+// some kind of input guarding for people poking stuff in via CLI arguments
+function value_not_N(value) = (value == undef || value < 0);
+function range_is_nil(value_range) = value_range == undef || len(value_range) == 0 || value_not_N(value_range[0]);
 
-nozzle_temp_range_text = show_temp_range("T", nozzle_temp_range);
-bed_temp_range_text = show_temp_range("B", bed_temp_range);
-chamber_temp_range_text = show_temp_range("C", chamber_temp_range);
+function show_value_range(value_label, value_range) = (
+    range_is_nil(value_range) ? "" : str(
+        value_label,
+        (value_not_N(value_range[1]) || value_range[0] == value_range[1])
+            ? value_range[0]
+            : str(value_range[0], "-", value_range[1])
+    ));
+    
+function show_value_approx(value_label, value_range) = (
+    range_is_nil(value_range) ? "" : str(
+        value_label,
+        (value_not_N(value_range[1]) || value_range[0] == value_range[1])
+            ? value_range[0]
+            : str((value_range[0]+value_range[1])/2, "±", (value_range[1] - value_range[0])/2)
+    ));
 
-print_settings_text = str(
+function show_range(value_label, value_range) = range_is_nil(value_range) ? "" : (len(show_value_range(value_label, value_range)) < len(show_value_approx(value_label, value_range)) ? show_value_range(value_label, value_range) : show_value_approx(value_label, value_range));
+
+nozzle_temp_range_text = show_range(label_settings_nozzle_temp_glyph, nozzle_temp_range);
+bed_temp_range_text = show_range(label_settings_bed_temp_glyph, bed_temp_range);
+chamber_temp_range_text = show_range(label_settings_chamber_temp_glyph, chamber_temp_range);
+fan_speed_range_text = show_range(label_settings_fan_speed_glyph, part_fan_speed);
+
+print_settings_text = print_settings_override != "" ? print_settings_override : str(
     nozzle_temp_range_text,
     (nozzle_temp_range_text != "" && bed_temp_range_text != "") ? " " : "",
     bed_temp_range_text,
     (chamber_temp_range_text != "" && (nozzle_temp_range_text != "" || bed_temp_range_text != "")) ? " " : "",
-    chamber_temp_range_text
+    chamber_temp_range_text,
+    (fan_speed_range_text != "" && (nozzle_temp_range_text != "" || bed_temp_range_text != "" || chamber_temp_range_text != "")) ? " " : ""
 );
 
 function staircase_layer(step_num) = layer_n(initial_layer_height + (body_thickness - layer_top(1)) / (staircase_steps - 1) * (step_num-1));
@@ -243,7 +271,7 @@ module label_text_flat() {
         }
         translate([0, -label_details_font_height-label_line_spacing, 0]) {
             if (color_name != "") {
-                text(color_name, size=label_details_font_height, font=label_details_font_id);
+                text(color_name, size=label_details_font_height, font=label_color_name_font_id);
             } else {
                 square([staircase_max_length - label_line_spacing, label_line_spacing/2]);
             }
@@ -293,8 +321,3 @@ swatch_basic() {
         }
     }
 }
-/*
-translate([body_length - 10, body_width/2, 0])
-linear_extrude(label_thickness)
-rotate([0,0,90])
-#text("ASA", halign="center", size=8);*/
