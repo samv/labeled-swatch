@@ -16,24 +16,25 @@ import subprocess
 import sys
 import time
 import traceback
-from typing import Any, Callable, Coroutine, Dict, List, Optional
+from typing import Any, Callable, Coroutine, Dict, List, Optional, Type
 import yaml
 
 
 # relative to nozzle size
 FIRST_LAYER_HEIGHT = 0.6
-VERBOSE = False
+VERBOSE = True
 DEBUG = False
 
 LABEL_SCAD = path.join(path.dirname(__file__), "labeled-swatch.scad")
 
 
 async def build_stl(
+        openscad: str,
         scad_file: str,
         output_file: str,
         **defines: str,
 ) -> Optional[BaseException]:
-    openscad_args = ["openscad", scad_file, "-o", output_file]
+    openscad_args = [openscad, scad_file, "-o", output_file]
     for key, value in defines.items():
         if isinstance(value, str):
             value = '"' + value.replace('"', '\"') + '"'
@@ -98,8 +99,13 @@ class SwatchMakeResult:
     error: Optional[BaseException] = None
     stack: Optional[traceback.StackSummary] = None
 
+    @property
+    def stl(self):
+        return self.label_stl or self.body_stl
+
 
 async def make_swatch(
+        openscad: str,
         settings_filename: str,
         print_mode: PrintMode,
         output_dir: Optional[str] = "",
@@ -115,13 +121,73 @@ async def make_swatch(
 
     infile = LABEL_SCAD
 
+    def fetch_key(json_datas: Dict[str, [Dict[str, Any]]], key: str,
+                  expect_type: Optional[Type[Any]] = None) -> Any:
+        found = False
+        reasons_bad = dict()
+        for file_label, json_data in json_datas.items():
+            bad_reason = ("no data" if json_data is None else
+                          "not a dict" if json_data is None else
+                          "key missing" if key not in json_data else
+                          f"bad type: wanted {expect_type.__name__}, saw {type(json_data[key]).__name__}"
+                          if (expect_type and not isinstance(json_data[key], expect_type)) else None)
+            if bad_reason is not None:
+                reasons_bad[file_label] = bad_reason
+            else:
+                return json_data[key]
+        raise RuntimeError(f"could get find {key!r} in JSON; {reasons_bad}")
+
     details = dict(defines)
+    if VERBOSE:
+        print(f"Reading: {shorten_settings_path(settings_filename)}")
     with open(settings_filename) as settings_json:
         info = json.load(settings_json)
-        vendor = info["filament_vendor"][0]
+        inherits = "maybe"
+        inherits_history = [shorten_settings_path(settings_filename)]
+        infostack = {inherits_history[0]: info}
+        while inherits:
+            inherits = info.get("inherits")
+            inherited_info = []
+            settings_dir = path.dirname(settings_filename)
+            if inherits:
+                parent_filename = f"{inherits}.json"
+                inherits_history.append(parent_filename)
+                parent_setting = path.join(settings_dir, parent_filename)
+                if not path.exists(parent_setting):
+                    try_path = path.join(settings_dir, "base", parent_filename)
+                    if path.exists(try_path):
+                        parent_setting = try_path
+                    else:
+                        raise RuntimeError(f"Setting {inherits!r} mentioned via: {'; inherits '.join(inherits_history)}, but could not find {parent_filename!r} in {settings_dir}")
+                if VERBOSE:
+                    print(f"\tReading parent: {shorten_settings_path(parent_setting)}")
+                with open(parent_setting) as parent_settings_json:
+                    parent_data = json.load(parent_settings_json)
+                    inherited_info.append(parent_data)
+                    infostack[parent_filename] = parent_data
+                    inherits = parent_data.get("inherits")
+        vendor = fetch_key(infostack, "filament_vendor", list)[0]
         details["manufacturer"] = vendor
-        material = info["filament_type"][0]
+        material = fetch_key(infostack, "filament_type", list)[0]
+
+        filament_name = fetch_key(infostack, "name", str)
+        vmc = f"{vendor} {material}\\s*([^@\\s][^@]*)@"
+        vcm = f"{vendor}\\s*([^@\\s][^@]*)\\s+{material}\\s*@"
+        vmc_m = re.match(vmc, filament_name)
+        vcm_m = re.match(vcm, filament_name)
+        match = vmc_m if vmc_m else vcm_m
+        if match:
+            color_name = match.group(1)
+        else:
+            color_name = ""
+        if color_name.startswith("-"):
+            type_suffix_m = re.match(r'(-\S+)\s+(.*)', color_name)
+            if type_suffix_m:
+                material += type_suffix_m.group(1)
+                color_name = type_suffix_m.group(2)
         details["material"] = material
+        details["color_name"] = color_name
+        rgb = canonical_rgb_hex(fetch_key(infostack, "default_filament_colour", list)[0])
 
         # some very Gotham-specific shrinking rules; TODO: use PIL, locate and open the font,
         # and determine based on metrics whether the specific letters fit in the space.
@@ -148,16 +214,6 @@ async def make_swatch(
             if len(vendor) > 13:
                 details["label_manufacturer_font_height"] = 7 - (len(vendor) - 13)*0.3
   
-        filament_name = info["name"]
-        pattern = f"{vendor} {material}\\s*([^@\\s][^@]*)@"
-        m = re.match(pattern, filament_name)
-        if m:
-            details["color_name"] = m.group(1)
-            color_name = m.group(1)
-            
-        else:
-            color_name = ""
-        rgb = canonical_rgb_hex(info["default_filament_colour"][0])
 
         # some very Noto Sans-specific shrinking values...
         if len(color_name) <= 11 and len(rgb) < 7:
@@ -172,9 +228,10 @@ async def make_swatch(
                 details["label_details_font_height"] = 5.0 - (len(color_name) - 16)*0.25
 
         details["color_code"] = rgb
-        details["cost_per_kg"] = math.ceil(float(info["filament_cost"][0]))
+        details["cost_per_kg"] = math.ceil(float(fetch_key(infostack, "filament_cost", list)[0]))
 
-        details["nozzle_temp_range"] = [int(info["nozzle_temperature_range_low"][0]), int(info["nozzle_temperature_range_high"][0])]
+        details["nozzle_temp_range"] = [int(fetch_key(infostack, "nozzle_temperature_range_low", list)[0]),
+                                        int(fetch_key(infostack, "nozzle_temperature_range_high", list)[0])]
         (bed_min, bed_max) = -1, -1
         for plate_type in "hot", "eng", "textured":
             for which in "temperature", "temperature_initial_layer":
@@ -191,7 +248,7 @@ async def make_swatch(
         # some more semi-automatic font auto-picking
         if bed_min > 0:
             details["label_settings_font_width"] = "ExtraCondensed"
-        chamber_temp = int(info["chamber_temperatures"][0])
+        chamber_temp = int(info.get("chamber_temperatures", [0])[0])
         if chamber_temp != 0:
             details["chamber_temp_range"] = [chamber_temp, chamber_temp]
             if bed_min > 0:
@@ -201,21 +258,28 @@ async def make_swatch(
 
     filename_tag = tagify(vendor, material, color_name or rgb)
     details = readwrite_preset(filename_tag, details, read=read_preset, write=write_preset)
+    if "no_label" in details:
+        del details["no_label"]
+    if "no_body" in details:
+        del details["no_body"]
 
     details["print_mode"] = print_mode.value
     result = SwatchMakeResult(
         input_filename=settings_filename,
         details=details,
     )
+
+    if VERBOSE:
+        print(f"Generating swatches for {details['manufacturer']} {details['color_name'] or details['color_code']} {details['material']}")
     if print_mode == PrintMode.MONO:
         result.body_stl = path.join(output_dir, f"swatch-mono-{filename_tag}.stl")
-        result.error = await build_stl(infile, result.body_stl, **details)
+        result.error = await build_stl(openscad, infile, result.body_stl, **details)
     else:
         #if print_mode == PrintMode.MANUAL:
         result.body_stl = path.join(output_dir, f"swatch-{filename_tag}-body.stl")
-        result.error = await build_stl(infile, result.body_stl, no_label=True, **details)
+        result.error = await build_stl(openscad, infile, result.body_stl, no_label=True, **details)
         result.label_stl = path.join(output_dir, f"swatch-{filename_tag}-label.stl")
-        label_error = await build_stl(infile, result.label_stl, no_body=True, **details)
+        label_error = await build_stl(openscad, infile, result.label_stl, no_body=True, **details)
         if result.error is None:
             result.error = label_error
         elif label_error is not None:
@@ -226,46 +290,59 @@ async def make_swatch(
 PRESETS_TO_WRITE = {}
 
 
+def fix_openscad_types(scad: Dict[str, str]) -> Dict[str, Any]:
+    return dict((key, fix_openscad_value(value)) for key, value in scad.items())
+
+
+def fix_openscad_value(scad: str) -> Any:
+    try:
+        return json.loads(scad)
+    except:
+        return scad
+
+
 def readwrite_preset(preset_name: str, details: Dict[str, Any], read: bool, write: bool):
     """Uses the OpenSCAD preset system to allow per-filament customization of things"""
     if not (read or write):
         return details
 
-    preset_filename = LABEL_SCAD.replace(".scad", ".json")
+    preset_filename = pathlib.Path(LABEL_SCAD.replace(".scad", ".json"))
 
-    if read and os.exists(preset_filename):
-        with open(preset_filename) as preset_file:
-            preset_json = json.load(preset_file).get("parameterSets", {}).get(preset_name, {})
+    if read and preset_filename.exists():
+        with preset_filename.open() as preset_file:
+            preset_json = json.load(preset_file).get("parameterSets", {}).get(preset_name, details)
             # if this field this script never sets is there, it means it was configured in
             # OpenSCAD, so use it
             if "edge_width" in preset_json:
-                details = preset_json
+                print(f"Overriding details for {preset_name} label from OpenSCAD presets {preset_filename}")
+                details = fix_openscad_types(preset_json)
                 # don't ever re-write out one we just read, at this level anyway
                 write = False
 
     if write:
+        print(f"Marking details for {preset_name} label for write to OpenSCAD presets file {preset_filename.name}")
         PRESETS_TO_WRITE[preset_name] = details
 
     return details
 
 
 def commit_presets():
-    preset_filename = LABEL_SCAD.replace(".scad", ".json")
+    preset_filename = pathlib.Path(LABEL_SCAD.replace(".scad", ".json"))
 
-    existing_presets = {}
-    if os.exists(preset_filename):
-        with open(preset_filename) as preset_file:
-            existing_presets = json.load(preset_file)
+    presets = {}
+    if preset_filename.exists():
+        with preset_filename.open() as preset_file:
+            presets = json.load(preset_file)
     else:
-        existing_presets = {
+        presets = {
             "parameterSets": {},
             "fileFormatVersion": "1"
         }
+    presets["parameterSets"].update(PRESETS_TO_WRITE)
 
-    if write:
-        PRESETS_TO_WRITE[preset_name] = details
-
-    return details
+    with preset_filename.open("w") as preset_file:
+        json.dump(presets, preset_file)
+        print(f"Wrote {len(PRESETS_TO_WRITE)} and preserved {len(presets['parameterSets'])-len(PRESETS_TO_WRITE)} presets to {preset_filename.name}")
 
 
 non_token_letters = re.compile(r'\W', re.UNICODE)
@@ -275,11 +352,28 @@ def tagify(*values: str) -> str:
     return '-'.join(non_token_letters.sub('', value) for value in values)
 
 
-async def catch_error(async_func: Callable[[str, ...], Coroutine], filename: str, *args: Any,
+def shorten_settings_path(full_path: str) -> str:
+    return re.sub(r'.*/(?P<slicer>(?:Bambu|Orca)\w+)/.*/(?P<basename>[^/]+)$',
+                  lambda m: f"{m.group('slicer')}/.../{m.group('basename')}", full_path, re.I)
+
+def enrich_exception(exc: BaseException) -> str:
+    exception_text = str(exc)
+    exception_type_name = type(exc).__name__
+    if exception_type_name not in exception_text:
+        return f"{exception_type_name}: {exception_text}"
+    return exception_text
+
+
+async def catch_error(async_func: Callable[[str, ...], Coroutine], openscad_path, filename: str, *args: Any,
                       **kwargs: Any) -> SwatchMakeResult:
     try:
-        return await async_func(filename, *args, **kwargs)
+        return await async_func(openscad_path, filename, *args, **kwargs)
     except Exception as exc:
+        try:
+            exc_text = enrich_exception(exc)
+        except Exception as exc2:
+            exc_text = f"{str(exc)} (exception while enriching: {exc2})"
+        print(f"Exception while processing {shorten_settings_path(filename)}: {exc_text}")
         stack_trace = traceback.TracebackException.from_exception(exc)
         return SwatchMakeResult(filename, error=exc, stack=stack_trace)
 
@@ -313,7 +407,7 @@ def canonical_rgb_hex(hex_code: str) -> str:
 
 @click.command()
 @click.option(
-    "--print-mode",
+    "--print-mode", "-p",
     help=f"Whether you have an MMU, want to manually change filaments part way, or want monochrome (labeled) swatches: ({', '.join(PrintMode.modes)})",
 
     type=click.UNPROCESSED,
@@ -321,16 +415,18 @@ def canonical_rgb_hex(hex_code: str) -> str:
     metavar="MODE",
     callback=get_print_mode,
 )
+@click.option("--mono", "-m", is_flag=-True, default=False, help="Alias for '--print-mode Mono'")
 @click.option("--parallel", "-l", type=int, default=-1, help="how many OpenSCAD instances to run in parallel")
 @click.option("--output_dir", "-O", type=click.Path(file_okay=False, path_type=pathlib.Path), default=None, help="directory to write generated swatch STL files to")
+@click.option("--openscad", "-o", type=str, default="openscad", help="program name of the OpenSCAD to use")
 @click.option("--verbose", "-v", is_flag=True, default=False, help="show openscad arguments")
 @click.option("--debug", "-d", is_flag=True, default=False, help="show openscad output")
 @click.option("--write-presets", "-w", is_flag=True, default=False, help="write generated customizer inputs to labeled-swatch.json")
 @click.option("--read-presets", "-r", is_flag=True, default=False, help="use customizer inputs from labeled-swatch.json")
 @click.argument("setting_files", type=click.Path(exists=True), nargs=-1)
-def make(setting_files: List[str], print_mode: PrintMode, parallel: int,
+def make(setting_files: List[str], print_mode: PrintMode, mono: bool, parallel: int,
          verbose: bool, debug: bool, read_presets: bool, write_presets: bool,
-         output_dir: Optional[str]) -> None:
+         openscad: str, output_dir: Optional[str]) -> None:
     """Swatch maker."""
 
     if parallel <= 0:
@@ -340,6 +436,8 @@ def make(setting_files: List[str], print_mode: PrintMode, parallel: int,
     asyncio.set_event_loop(loopy)
     global VERBOSE, DEBUG
     VERBOSE, DEBUG = verbose, debug
+    if mono:
+        print_mode = PrintMode.MONO
 
     todo_tasks = []
     results = []
@@ -348,10 +446,12 @@ def make(setting_files: List[str], print_mode: PrintMode, parallel: int,
         make_swatch_args.update(read_preset=True)
     if write_presets:
         make_swatch_args.update(write_preset=True)
+    if len(setting_files) > 0:
+        print(f"Processing {len(setting_files)} filament settings files, max. parallelism = {parallel}")
     while todo_tasks or setting_files:
         if len(todo_tasks) < parallel and len(setting_files) > 0:
             new_task = asyncio.ensure_future(
-                catch_error(make_swatch, setting_files[0], print_mode, **make_swatch_args),
+                catch_error(make_swatch, openscad, setting_files[0], print_mode, output_dir, **make_swatch_args),
             )
             todo_tasks.append(new_task)
             new_task.filename, setting_files = setting_files[0], setting_files[1:]
@@ -380,8 +480,34 @@ def make(setting_files: List[str], print_mode: PrintMode, parallel: int,
         if tasks_finished:
             todo_tasks = list(task for task in todo_tasks if task not in done)
 
-    print("Generated swatch files:")
-    row_fmt = "%40s %15s %6s %7s %-12s %7s %7s"
+    err_count = sum(1 if result.error else 0 for result in results)
+    ok_count = sum(0 if result.error else 1 for result in results)
+    summary = ("Nothing to do" if len(results) == 0 else
+               "All tasks completed" if (err_count == 0) else
+               "All tasks failed" if (ok_count == 0) else
+               "Some tasks failed")
+    print(f"{summary}, {ok_count} OK and {err_count} error(s)")
+
+    if err_count > 0:
+        print(f"First error:")
+        for result in results:
+            if result.error:
+                print(f"While processing {result.input_filename}, got {result.error}.")
+                for line in result.stack.format():
+                    print("\t", line)
+                break
+
+    if ok_count == 0:
+        sys.exit(1)
+
+    if write_presets and len(PRESETS_TO_WRITE) > 0:
+        commit_presets()
+
+    print(f"Generated swatch files in {output_dir or '.'}:")
+    max_len_filename = max(len(result.stl or "") for result in results)
+    max_len_vendor = max(len(result.details["manufacturer"]) for result in results)
+    max_len_color = max(len(result.details["color_name"]) for result in results)
+    row_fmt = f"%-{max_len_filename+1}s %-{max([max_len_vendor, 6])}s %-6s %7s %-{max([5, max_len_color])}s %7s %7s"
     print(row_fmt % ("filename", "vendor", "type", "rgb", "color", "price", "print settings"))
     error_row_fmt = "%40s  %s %s: %s"
 
@@ -398,15 +524,13 @@ def make(setting_files: List[str], print_mode: PrintMode, parallel: int,
                     print(line)
             continue
         print(row_fmt % (
-            input_basename,
+            result.stl,
             result.details["manufacturer"], result.details["material"],
             result.details["color_code"], result.details["color_name"],
             f'${result.details["cost_per_kg"]}/kg',
             result.details["nozzle_temp_range"]
         ))
 
-    if len(PRESETS_TO_WRITE) > 0:
-        write_presets()
 
 
 if __name__ == "__main__":

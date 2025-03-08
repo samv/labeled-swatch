@@ -92,9 +92,9 @@ label_settings_fan_speed_glyph = "F:";  // ["F:", Ⓒ, 🄲, 🅲, ⛶, ▣, �
 /* [Swatch Dimensions] */
 // Maximum swatch thickness
 swatch_thickness = 3;  // [1.5:0.1:4.5]
-body_thickness = 2.4; // [1:0.1:3]
+body_thickness = 1.7; // [1:0.1:3]
 // label thickness is the difference between the above two, up to this value
-label_max_thickness = 0.6; // [0.2:0.05:1]
+label_max_thickness = 0.65; // [0.2:0.05:1]
 
 // Overall dimensions
 swatch_length = 75;  // [50:0.5:83]
@@ -131,7 +131,7 @@ echo(str("Layers: Swatch: ", swatch_layers, ", body: ", body_layers, " label: ",
 function layers_thick(n) = layer_height * n;
 function layer_top(n) = initial_layer_height + (layer_height * (n-1));
 
-label_thickness = swatch_thickness - body_thickness;
+label_thickness = layer_height * label_layers;
 
 verbose_height = (cost_per_kg > 0 ? label_details_font_height + label_line_spacing : 0) + (
     color_code != "" ? label_details_font_height + label_line_spacing : 0);
@@ -150,7 +150,7 @@ label_inner_length = body_length - label_inner_margin*2;
 echo(str("height of verbose text: ", verbose_height, "mm"));
 
 staircase_max_length = label_inner_length - label_material_font_height - label_line_spacing*2 - verbose_height;
-staircase_steps = min(body_layers, floor(staircase_max_length / staircase_size));
+staircase_steps = min(body_layers-1, floor(staircase_max_length / staircase_size));
 echo(str("staircase max length: ", staircase_max_length, "mm, steps: ", staircase_steps));
 
 function spaced(maybe_word, new_word) = str(maybe_word, ((maybe_word == "" || maybe_word[len(maybe_word)-1] == " ") && new_word != "") ? "" : " ", new_word);
@@ -200,7 +200,10 @@ print_settings_text = print_settings_override != "" ? print_settings_override : 
     (fan_speed_range_text != "" && (nozzle_temp_range_text != "" || bed_temp_range_text != "" || chamber_temp_range_text != "")) ? " " : ""
 );
 
-function staircase_layer(step_num) = layer_n(initial_layer_height + (body_thickness - layer_top(1)) / (staircase_steps - 1) * (step_num-1));
+function staircase_layer(step_num) = layer_n(
+        initial_layer_height + (layer_top(body_layers-1) - layer_top(1))
+        / (staircase_steps - 1) * step_num
+);
 
 function color_or_default(color_entry) = color_entry == "" ? "yellow" : color_entry;
 
@@ -241,15 +244,16 @@ module swatch_basic() {
                 linear_extrude(layer_top(swatch_layers))
                     swatch_outline(border_width);
                 translate([border_width, border_width, 0])
-                    cube([body_length, body_width, body_thickness]);
+                    cube([body_length, body_width, layer_top(body_layers)]);
             }
-
+ 
+            echo(str("Cutting ", staircase_steps, " steps"));
             for(step = [0:staircase_steps-1]) {
                 step_layer = staircase_layer(step);
                 stair_size = [staircase_size, staircase_size,
                     layer_top(body_layers+1) - layer_top(step_layer)];
-                stair_offset = [(step) * staircase_size, 0, body_thickness-(layer_top(body_layers+1) - layer_top(step_layer))];
-                position = [label_margin, label_margin, layer_top(1)] + stair_offset;
+                stair_offset = [(step) * staircase_size, 0, layer_top(step_layer)];
+                position = [label_margin, label_margin, 0] + stair_offset;
             
                 echo (str("Step ", step+1, ": layer is ", step_layer, " (top at ", layer_top(step_layer), "), offset ", stair_offset));
                 echo (str("Step ", step+1, ": drawing a cube at ", position, " size ", stair_size));                                                            
